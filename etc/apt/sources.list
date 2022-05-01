@@ -1,0 +1,8 @@
+###### Ubuntu Main Repos
+deb [arch=amd64] http://us.archive.ubuntu.com/ubuntu/ focal main universe
+deb [arch=armhf,arm64] http://ports.ubuntu.com focal main universe restricted
+###### Ubuntu Update Repos
+deb [arch=amd64] http://us.archive.ubuntu.com/ubuntu/ focal-security main universe restricted
+deb [arch=amd64] http://us.archive.ubuntu.com/ubuntu/ focal-updates main universe restricted
+deb [arch=armhf,arm64] http://ports.ubuntu.com focal-security main universe restricted
+deb [arch=armhf,arm64] http://ports.ubuntu.com focal-updates main universe restricted
