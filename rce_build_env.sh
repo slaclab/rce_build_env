@@ -5,6 +5,15 @@ _uid=$(id -u)
 _gid=$(id -g)
 _user=${USER}
 _user_record=$(getent passwd $USER)
+export PYTHONPATH=${_rootdir}/python
+_devices=$(bin/sdutil devlist)
+_devarg=""
+
+if [ ! -z "${_devices}" ]
+then
+  _devarg="--device ${_devices}"
+fi
+
 cat <<PASSWD >>${_tempdir}/passwd
 sync:x:4:65534:sync:/bin:/bin/sync
 games:x:5:60:games:/usr/games:/usr/sbin/nologin
@@ -109,9 +118,10 @@ docker run \
        -v ${_tempdir}/group:/etc/group:ro \
        -v ${_tempdir}/shadow:/etc/shadow:ro \
        -v ${HOME}:${HOME} \
+       ${_devarg} \
        --privileged \
        -ti \
-       -u $(id -u ${USER}):$(id -g ${USER}) rce/build_env:latest /bin/bash --login --norc --noprofile
+       -u $(id -u ${USER}):$(id -g ${USER}) rce/build_env:latest /bin/bash --login
 
 rm -rf ${_tempdir}
 

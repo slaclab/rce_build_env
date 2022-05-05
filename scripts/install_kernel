@@ -1,0 +1,12 @@
+#!/bin/bash
+
+_root=$(dirname ${BASH_SOURCE})
+_root=$(cd ${_root}/> /dev/null 2>&1 && pwd)
+
+source ${_root}/../configs/kernel.conf
+
+sudo apt-get install -y \
+  linux-headers-${kernel_ver}-arm64 \
+  linux-headers-${kernel_ver}-armhf \
+  linux-image-${kernel_ver}-arm64 \
+  linux-image-${kernel_ver}-armhf

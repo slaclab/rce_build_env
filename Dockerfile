@@ -42,11 +42,14 @@ RUN apt-get update && apt-get install -y \
     libbz2-dev  \
     gnuplot \
     python3-dev \
-    gnupg
+    gnupg \
+    ruby
 
 COPY etc/sudoers /etc/sudoers 
 COPY etc/apt/sources.list /etc/apt/sources.list
 COPY etc/profile.d/02-sethome.sh /etc/profile.d/02-sethome.sh
+COPY etc/profile.d/03-register-binfmt.sh /etc/profile.d/03-register-binfmt.sh
+COPY bin/qemu-binfmt-conf.sh /bin/qemu-binfmt-conf.sh
 RUN apt-add-repository multiverse && apt-get update
 RUN apt-get update
 RUN apt-get install -y crossbuild-essential-armhf
@@ -67,3 +70,8 @@ RUN apt-get install -y libbz2-dev:arm64 libbz2-dev:arm64 libzmq3-dev:arm64 libpy
 RUN curl -s --compressed "https://slaclab.github.io/atlas-rce-repo/ubuntu/KEY.gpg" | sudo apt-key add -
 RUN curl -s --compressed -o /etc/apt/sources.list.d/atlas-rce.list https://slaclab.github.io/atlas-rce-repo/ubuntu/atlas-rce.list
 RUN apt-get update
+# user geoclue does not exist
+RUN sed -i '/geoclue/d' /var/lib/dpkg/statoverride
+
+# install ruby package fpm
+RUN gem install fpm

@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+
+import sys
+from pprint import pprint
+import cardutil
+
+def help():
+    print("usage: sdutil <command> <args...>")
+    print("sdutils help\n"
+          "    print this message")
+    print("sdutils list\n"
+          "    list potential sd cards")
+    print("sdutils umount <device>\n"
+          "    unmount <device>\n"
+          "    (for example: sdutils unmount sde)")
+    print("sdutils devlist\n"
+          "    print device name list\n"
+          "    (for example returns /dev/sda,/dev/sdb)"
+          )
+argc = len(sys.argv)
+
+if argc < 2:
+    help()
+    sys.exit(-1)
+
+cmd = sys.argv[1]
+if cmd == 'devlist' and argc == 2 :
+    print(cardutil.device_list())
+elif cmd == 'umount' and argc == 3:
+    device = sys.argv[2]
+    try:
+        cardutil.umount_sd(device)
+    except:
+        print("Unmount of %s Failed" % device)
+elif cmd == 'list' and argc == 2:
+    sd = cardutil.find_sd()
+    pprint(sd)
+else:
+    help()
