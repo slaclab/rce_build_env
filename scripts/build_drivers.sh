@@ -5,7 +5,7 @@ _root=$(cd ${_root}/> /dev/null 2>&1 && pwd)
 source ${_root}/../configs/kernel.conf
 
 GIT_REPO=https://github.com/slaclab/aes-stream-drivers
-GIT_TAG=fix_kernel_v5
+GIT_TAG=5.17.2
 
 
 _topdir=${_root}/../build_drivers

@@ -43,7 +43,10 @@ RUN apt-get update && apt-get install -y \
     gnuplot \
     python3-dev \
     gnupg \
-    ruby
+    ruby \
+    parted \
+    python3-parted \
+    dosfstools
 
 COPY etc/sudoers /etc/sudoers 
 COPY etc/apt/sources.list /etc/apt/sources.list
@@ -75,3 +78,8 @@ RUN sed -i '/geoclue/d' /var/lib/dpkg/statoverride
 
 # install ruby package fpm
 RUN gem install fpm
+
+# SD card mount points
+RUN mkdir -p /mnt/LINUX
+RUN mkdir -p /mnt/BOOT
+RUN mkdir -p /mnt/ROOTFS
