@@ -1,0 +1,465 @@
+#!/usr/bin/env python3
+import parted
+import subprocess
+import uuid
+import os
+import sys
+import logging
+import traceback
+import re
+import argparse
+import requests
+from bs4 import BeautifulSoup
+import urllib
+import hashlib
+import json
+import datetime
+import shutil
+
+DEFAULT_PARTITION_TABLE_4GB=(
+    (256,"fat32","BOOT"),  #BOOT sdx1
+    (512,"fat32","LINUX"), #LINUX sdx2
+    (-1,"ext4","ROOTFS") #LINUX sdx3
+)
+DEFAULT_PARTITION_TABLE_32GB=(
+    (256,"fat32","BOOT"),  #BOOT sdx1
+    (512,"fat32","LINUX"), #LINUX sdx2
+    (-1,"ext4","ROOTFS") #LINUX sdx3
+)
+
+ZEDBOARD_PARTITION_TABLE=(
+    (256,"fat32","BOOT"), 
+    (-1,"ext4","ROOTFS")
+)
+
+ZEDBOARD_UBOOT_ENV={
+
+}
+
+ZYNQ_UBOOT_ENV={
+"ethaddr":"00:00:00:00:00:00",
+"bootdelay":"3",
+"phycfg":"0x1",
+"modeboot":"sdboot_linux",
+"bootdefs":"console=ttyPS0,115200 rw rootwait earlyprintk",
+"bootargs":"console=ttyPS0,115200 rw rootwait earlyprintk root=/dev/mmcblk0p3",
+"bootcmd":"run $modeboot",
+"sd_rootfs":"/dev/mmcblk0p3",
+"devicetree_image":"devicetree.dtb",
+"kernel_image":"uImage",
+"loadbit":"1",
+"ramdisk_devicetree":"devicetree.dtb",
+"ramdisk_image":"uramdisk.image.gz",
+"ramdisk_kernel":"uImage",
+"ramdisk_rootfs":"/dev/ram",
+"mmc_loadbit_fat":"echo Loading bitstream from SD/MMC/eMMC to RAM.. &&     mmcinfo && fatload mmc 0:1 ${loadbit_addr} ${bitstream_image} && fpga loadb 0 ${loadbit_addr} ${filesize}",
+"sdboot_linux":"setenv modeboot sdboot_linux && echo Copying Linux from SD to RAM... && mmcinfo && fatload mmc 0:2 0x3000000 ${kernel_image} && fatload mmc 0:2 0x2A00000 ${devicetree_image} && bootm 0x3000000 - 0x2A00000",
+"sdboot_rdisk":"setenv modeboot sdboot_rdisk && echo Copying Linux from SD to RAM... && mmcinfo && fatload mmc 0:2 0x3000000 ${ramdisk_kernel} && fatload mmc 0:2 0x2A00000 ${ramdisk_devicetree} && fatload mmc 0:2 0x2000000 ${ramdisk_image} && bootm 0x3000000 0x2000000 0x2A00000",
+}
+DEFAULT_PARTITION_TABLE=DEFAULT_PARTITION_TABLE_32GB
+
+DEFAULT_CONFIG={
+"hsio2": (DEFAULT_PARTITION_TABLE,ZYNQ_UBOOT_ENV),
+"dtm": (DEFAULT_PARTITION_TABLE,ZYNQ_UBOOT_ENV),
+"dpm": (DEFAULT_PARTITION_TABLE,ZYNQ_UBOOT_ENV),
+"zedboard": (DEFAULT_PARTITION_TABLE,ZYNQ_UBOOT_ENV),
+"zcu102": (DEFAULT_PARTITION_TABLE,ZYNQ_UBOOT_ENV)
+}
+
+board_alias= {
+"dtm" : "DtmEmpty",
+"hsio2": "AtlasRd53HsioDtm",
+"dpm" : "AtlasRd53Dpm",
+"zcu102": "AtlasRd53FmcXilinxZcu102"
+}
+
+def md5_hash(filename):
+    def file_as_bytes(file):
+        with file:
+            return file.read()
+    return hashlib.md5(file_as_bytes(open(filename, 'rb'))).hexdigest()
+
+class RceFirmware:
+    def read_url(self,url,result=None):
+        if result is None: result=list()
+        a = urllib.urlopen(url).read()
+        soup = BeautifulSoup(a, 'html.parser')
+        x = (soup.find_all('a'))
+        for i in x:
+            file_name = i.extract().get_text()
+            url_new = url + file_name
+            if(file_name[-1]=='/' and file_name[0]!='.'):
+                self.read_url(url_new,result)
+            if url_new.endswith(".bit") or url_new.endswith(".bin"): result.append(url_new)
+        return result
+    def find_latest_tag(self,board):
+        tag_list=dict()
+        result=self.read_url("http://cern.ch/rcesw/firmware/"+board+"/")
+        last=-1
+        filename=""
+        url=""
+        vers=""
+        for r in result:
+            a=r.split("/")
+            tag=a[-2]        
+            v=tag.strip("v").split(".")
+            version=0
+            last=-1
+            for i in range(len(v)-1,-1,-1): 
+                version=version+int(v[len(v)-1-i])*100**i    
+                if(version>last): 
+                    last=version
+                    vers=v
+                    url=r
+                    filename=a[-1]
+        return (vers,url,filename)
+    def download(self,board,outdir,version=-1):
+        fw_file="/fpga.bit"
+        if(board=="zcu102"): fw_file="/fpga.bin"
+        board=board_alias[board]
+        result=self.find_latest_tag(board)
+        vers=result[0]
+        url=result[1]
+        filename=result[2]
+        logging.info("Downloading FW from "+url)        
+        r = requests.get(url)
+        f = open( outdir+fw_file, 'wb' )
+        f.write( r.content )
+        f.close()
+        os.system("/bin/sync")
+        md5=md5_hash(outdir+fw_file)
+        ret = {
+            "board": board,
+            "version" : vers,
+            "md5" : md5,
+            "file" : filename,
+            "installed" : str(datetime.datetime.utcnow().isoformat())
+        }
+        os.system("/bin/sync")
+#        shutil.copyfile(outdir+"/"+filename,outdir+"/fpga.bit")
+        logging.info("Installed "+outdir+"/"+filename+" as "+outdir+fw_file)
+        os.system("/bin/sync")
+        with open(outdir+"/rce_fw.json", 'w') as outfile:
+            json.dump(ret, outfile,indent=4)
+        os.system("/bin/sync")				
+        return filename
+basedir="/opt/rce"
+#target="armv7hl"
+        
+class RceKernel:
+    def install(self,board,linuxdir,bootdir,target,ver='current'):
+        with open(basedir+'/etc/sdk.json') as f:
+            data = json.load(f)
+        if ver=='current': ver=data['current']
+        sdk=data[ver]
+        kernel=basedir+"/package/"+target+"/xilinx_kernel/"+sdk["xilinx_kernel"]
+        drivers=basedir+"/package/"+target+"/drivers/"+sdk["drivers"]
+        if board=="zcu102":
+            shutil.copyfile(kernel+"/images/Image",bootdir+"/Image")
+            shutil.copyfile(kernel+"/dtb/"+"zcu102.dtb",bootdir+"/system_ext3.dtb")
+            shutil.copy(kernel+"/images/boot/"+board+ "/uEnv.txt",bootdir+"/uEnv.txt")
+        else:
+            shutil.copyfile(kernel+"/images/uImage",linuxdir+"/uImage")
+            if(board=="hsio2"):
+                shutil.copyfile(kernel+"/dtb/"+"zynq-hsio2.dtb",linuxdir+"/devicetree.dtb")
+            else:
+                shutil.copyfile(kernel+"/dtb/"+"zynq-cob.dtb",linuxdir+"/devicetree.dtb")
+        shutil.copy(kernel+"/images/boot/"+board+ "/boot.bin",bootdir+"/boot.bin")
+        os.system("/bin/sync")
+        ret=  {"installed" : str(datetime.datetime.utcnow().isoformat())}
+        #ret = {
+        #    "board" : board,
+        #    "devicetree": "zynq-"+board+".dtb",
+        #    "devicetree_md5" : md5_hash(kernel+"/dtb/"+"zynq-"+board+".dtb"),
+        #    "kernel" : sdk["xilinx-kernel"],
+        #    "kernel_md5":  md5_hash(kernel+"/images/uImage"),
+        #    "boot.bin_md5": md5_hash(kernel+"/images/boot/hsio2/boot.bin"),
+        #    "installed" : str(datetime.datetime.utcnow().isoformat())
+        #}
+        with open(linuxdir+"/kernel.json", 'w') as outfile:
+            json.dump(ret, outfile,indent=4)
+        os.system("/bin/sync")
+
+        
+
+
+class CardUtil:
+    def find_sd(self):
+        sdcards=dict()
+        try:
+            p=subprocess.Popen(["lsblk","-d","-b","--output","TYPE,KNAME,RM,SIZE"],stdout=subprocess.PIPE,shell=False)
+            out,err=p.communicate()
+        except:
+            return
+        lines=out.decode('utf-8').rsplit("\n")
+        for l in lines[1:-1]:
+            (TYPE,KNAME,RM,SIZE)=l.split();
+            if(TYPE=="disk" and RM=="1" and int(SIZE)>3800000000):
+                sdcards[KNAME]=SIZE
+        return sdcards
+    def check_mac(self,mac):
+        allowed = re.compile(r"""
+                         (
+                            ^([0-9A-F]{2}[:]){5}([0-9A-F]{2})$
+                         )
+                         """,
+                             re.VERBOSE|re.IGNORECASE)
+        if allowed.match(mac) is None:
+            return False
+        else:
+            return True
+
+class uBootImage:
+    def __init__(self,environment,sdkroot):
+        self.env=environment
+        self.sdcards=dict()
+
+    def __make_env__(self):
+        env=""
+        for item in self.env:
+            env+="%s=%s\n"%(item,self.env[item])
+        return env
+  
+    def printEnv(self):
+        print (self.__make_env__())
+    def writeImage(self,envfile):
+        p = subprocess.Popen(['/usr/bin/mkenvimage','-s','131072','-o',envfile,'-'],stdout=subprocess.PIPE,stdin=subprocess.PIPE)
+        p.stdin.write(self.__make_env__().encode("utf-8"))
+        out,err=p.communicate()
+        p.stdin.close()
+class mkrcesd:
+    def __init__(self,device_name,rce,mac="00:00:00:00:00:00",rootfs=None):
+        devices=["dpm","dtm","hsio2","zedboard","zcu102"]
+        if(rce not in devices):
+            raise Exception("Invalid hardware platform: "+rce)
+        self.rce=rce
+        self.device_name=device_name
+        self.disk = None
+        self.partition_count=0
+        self.parts=list()
+        self.workdir=""
+        self.sdcards=dict()
+        self.mac=mac
+        self.rce_root=rootfs
+        self.find_sd()
+        if not os.path.exists(self.rce_root):
+            raise Exception("Path %s does not exit"%self.rce_root)
+        if self.device_name not in self.sdcards:
+            raise Exception("Device %s not found"%self.device_name)
+        self.device = parted.Device("/dev/"+device_name)    
+
+# find removeable disk devices with size > 3.8G 
+    def find_sd(self):
+        self.sdcards=CardUtil().find_sd()
+#unmount sd cards
+    def unmount_sd(self):
+        device_name=self.device_name
+        try:
+            p=subprocess.Popen(["lsblk","/dev/"+device_name,"--output","KNAME,TYPE,MOUNTPOINT"],stdout=subprocess.PIPE,shell=False)
+            out,err=p.communicate()
+        except:
+            return
+        lines=out.decode("utf-8").rsplit("\n")
+        for l in lines[1:]:
+            c=l.split()
+            if(len(c)==3 and c[1]=="part" and os.path.exists(c[2])):
+                logging.info ("umount /dev/"+c[0])
+                p=subprocess.Popen(["umount","/dev/"+c[0]],stdout=subprocess.PIPE,shell=False)
+                out,err=p.communicate()
+
+    def add_partition(self,size,fs_type,part_name):
+        device=self.device
+        disk=self.disk
+        self.partition_count+=1
+        if(self.partition_count==4):
+            free=disk.getFreeSpaceRegions()[0]
+            geometry = parted.Geometry(device, start=free.start, end=free.end)
+            partition = parted.Partition(disk, type=parted.PARTITION_EXTENDED, geometry=geometry, fs=None)
+            constraint = parted.Constraint(maxGeom=partition.geometry)
+            disk.addPartition(partition, constraint) 
+            self.partition_count+=1
+        if(self.partition_count>4):
+                part_type=parted.PARTITION_LOGICAL
+        else:
+            part_type=parted.PARTITION_NORMAL
+        free=disk.getFreeSpaceRegions()[0]
+        if(size==-1): 
+            geometry = parted.Geometry(device, start=free.start, end=free.end)
+        else:
+            geometry = parted.Geometry(device, start=free.start, length=int(size*1000*1000/512))
+        fs = parted.FileSystem(type=fs_type, geometry=geometry)   
+        partition = parted.Partition(disk, type=part_type, geometry=geometry, fs=fs)
+        constraint = parted.Constraint(maxGeom=partition.geometry)
+        disk.addPartition(partition, constraint) 
+        logging.info ("Created partition: " + part_name)
+        self.parts.append([part_name, self.device_name+str(self.partition_count),fs_type ])
+        disk.commit()
+    def format_partitions(self):
+        for p in self.parts:
+            if(p[2]=='fat32'):
+                fmt_cmd=['/sbin/mkfs.vfat','-n',p[0],"/dev/"+p[1]]
+            elif(p[2]=="ext4"):
+                fmt_cmd=['/sbin/mkfs.ext4','-q','-L',p[0],"/dev/"+p[1]]
+            else:
+                fmt_cmd=""
+            pipe = subprocess.Popen(fmt_cmd, stdout=subprocess.PIPE)
+            out,err=pipe.communicate()
+            logging.info( "Formatted "+p[0] + " with "+p[2])
+    def mount_partitions(self):
+        #create mount points
+        tempdir="/tmp/"+str(uuid.uuid4())
+        self.workdir=tempdir
+        os.mkdir(tempdir)
+        for p  in self.parts:
+            os.mkdir(tempdir+"/"+p[0])
+            mnt_cmd=["/bin/mount","-o","rw","/dev/"+p[1],tempdir+"/"+p[0]]
+            pipe = subprocess.Popen(mnt_cmd, stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+            out,err=pipe.communicate()
+            logging.info ("Mounted " +p[0])
+        
+    def unmount_partitions(self):
+        for p  in self.parts:
+            os.system("/bin/sync")
+            os.system("/bin/sync")
+            os.system("/bin/sync")
+            umnt_cmd=["/bin/umount","/dev/"+p[1]]
+            pipe = subprocess.Popen(umnt_cmd, stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+            out,err=pipe.communicate()
+    def cleanup(self):
+        for p  in self.parts:
+            os.rmdir(self.workdir+"/"+p[0])
+            logging.info ("Unmounted " +p[0])
+
+    def install_files(self,source,dest,recursive=True):
+        cmd=["/usr/bin/rsync","-rlptD",self.rce_root+source,self.workdir+dest]
+        logging.info ("Rsync "+self.rce_root+source+" to " + self.workdir+dest)
+        pipe = subprocess.Popen(cmd, stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        out,err=pipe.communicate()
+    def make_partitions(self,table=None):
+        if(table==None):
+            part_table=DEFAULT_CONFIG[self.rce][0]
+        else:
+            part_table=table
+        self.unmount_sd()
+        self.disk = parted.freshDisk(self.device, "msdos")
+        for p in part_table:
+            self.add_partition(*p)
+        self.format_partitions()
+        cmd=['/sbin/partprobe','/dev/'+self.device_name]
+        pipe = subprocess.Popen(cmd, stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        out,err=pipe.communicate()
+
+    def install(self):
+        self.mount_partitions()
+        self.install_files("/","/ROOTFS")
+        target="armv7hl"
+        if self.rce=="zcu102": target="aarch64"
+        if(self.rce=="dtm"):
+            os.system("chroot " + self.workdir+"/ROOTFS" + " systemctl enable rced")
+        elif(self.rce=="dpm"):
+            os.system("chroot " + self.workdir+"/ROOTFS" + " systemctl enable rced")
+            pass
+        elif(self.rce=="hsio2"):
+            pass
+        logging.info("Install ROOTFS done")
+        RceKernel().install(self.rce,self.workdir+"/LINUX",self.workdir+"/BOOT",target)
+        RceFirmware().download(self.rce,self.workdir+"/BOOT")
+
+        env=DEFAULT_CONFIG[self.rce][1]
+        if(self.rce!="zcu102"):
+            logging.info("make uboot.env")
+            image=uBootImage(env,sdkroot)
+            image.env['ethaddr']=self.mac
+            image.writeImage(self.workdir+"/BOOT/uboot.env")
+        cmd=["/bin/sync"]
+        logging.info("Sync devices buffers")
+        pipe = subprocess.Popen(cmd, stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        out,err=pipe.communicate()
+        self.unmount_partitions()
+
+sdkroot=None
+oldarg=sys.argv
+mac="00:00:00:00:00:00"
+parser = argparse.ArgumentParser(description='Tool to create and update RCE SD cards')  
+   
+parser.add_argument('-l','--list',action='store_true',
+                    help='list valid SD card device names')
+parser.add_argument('-v','--verbose',action='store_true',
+                    help='verbose output')
+parser.add_argument('hardware', metavar='hardware', type=str,nargs='?',
+                   help='RCE hardware (dtm,dpm,hsio2 or zedboard)')
+parser.add_argument('sd_device', metavar='sd_device', type=str,nargs='?',
+                   help='SD card device name (e.g. sdd)')
+parser.add_argument('--mac', nargs=1,
+                    help='set MAC address in uBoot (e.g. --mac 00:08:03:04:03:04)')
+parser.add_argument('--rootfs', nargs=1,
+                    help='set path to SDK')
+parser.add_argument('--fw_version', nargs=1,
+                    help='specify firmware verion')
+
+
+args = vars(parser.parse_args())
+FORMAT = '%(levelname)s : %(message)s'
+if args['verbose']:
+    logging.basicConfig(format=FORMAT,stream=sys.stdout, level=logging.DEBUG)
+if args['mac'] is not None: mac=args['mac'][0] 
+if not args['list'] and (args['hardware'] == None or args['sd_device'] == None):
+    print( '%s: error: too few arguments' % sys.argv[0])
+    exit(0)
+
+if(args['list']):
+    cards=CardUtil().find_sd()
+    if(len(cards)>0):
+        print ("SD card device candidates found:")
+        print ("Device   Size [GB]")
+        print ("========================")
+        for i in cards:
+            print (i,"    ",float(int(cards[i])/1000/1000)/1000)
+    else:
+        print ("No SD card device candidates found")
+    exit(0)
+if not args['rootfs']:
+    print ("%s: error: rootfs it not defined" % sys.argv[0])
+    exit(0)
+rootfs=args['rootfs'][0] 
+hardware=args['hardware']
+if not  CardUtil().check_mac(mac):
+    print ("Invalid MAC address format: ",mac)
+    exit(1)
+fw_version=-1
+if args['fw_version'] is not None:
+    fw_version=args['fw_version'][0]
+
+
+
+if(os.getuid()!=0):
+    print ("Program must to run as superuser")
+    print ("Relaunching as: sudo "," ".join(sys.argv))
+    os.execvp("sudo",[
+    "sudo",
+    ]+sys.argv)
+    exit(0)
+try:
+    sd=mkrcesd(args['sd_device'],args['hardware'],mac,rootfs)
+except Exception as e:
+    print( e )
+    exit(1)	  
+try:
+    cards=CardUtil().find_sd()
+    print ("Create SD card for "+hardware+ " with MAC="+mac)
+    card_size=float(int(cards[args['sd_device']])/1000/1000)/1000
+    part=None
+    if(card_size>3.7 and card_size<28):
+        part=DEFAULT_PARTITION_TABLE_4GB
+    elif(card_size>28):
+        part=DEFAULT_PARTITION_TABLE_32GB
+    sd.make_partitions(part)
+    sd.install()
+except Exception as e:
+        print ("SD card creation failed:",e)
+        raise
+sd.cleanup()
+
+
+ 
+
