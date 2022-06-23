@@ -46,8 +46,11 @@ RUN apt-get update && apt-get install -y \
     ruby \
     parted \
     python3-parted \
-    dosfstools
+    dosfstools \
+    libfreeipmi-dev \
+    libpth-dev
 
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3 10
 COPY etc/sudoers /etc/sudoers 
 COPY etc/apt/sources.list /etc/apt/sources.list
 COPY etc/profile.d/02-sethome.sh /etc/profile.d/02-sethome.sh
