@@ -1,0 +1,6 @@
+_sdkroot=$(dirname ${BASH_SOURCE})
+_sdkroot=$(cd ${_sdkroot}/../> /dev/null 2>&1 && pwd)
+export PATH=${_sdkroot}/bin:${PATH}
+export LD_LIBRARY_PATH=${_sdkroot}/bin:${LD_LIBRARY_PATH}
+unset _sdkroot
+unset _sdkver
